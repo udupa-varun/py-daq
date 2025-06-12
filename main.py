@@ -89,19 +89,15 @@ async def main(args):
             success = await collector.collect_data(output_file_path)
 
             if success:
-                logger.info("Data collection completed successfully")
-                logger.info(f"Data written to {output_file_path}")
+                logger.info("Data collection completed successfully.")
+                logger.info(f"Data written to {output_file_path}.")
             else:
-                logger.error("Data collection failed")
+                logger.error("Data collection failed!")
     except Exception as e:
         logger.error(f"Error during data collection: {e}")
 
 
 if __name__ == "__main__":
-    start_time = datetime.now(tz=timezone.utc)
-    fmt = "%Y%m%d-%H%M%S"
-    start_time_formatted = start_time.strftime(fmt)
-
     ap = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     ap.add_argument(

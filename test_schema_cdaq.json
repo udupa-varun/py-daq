@@ -1,0 +1,54 @@
+{
+    "asset": "TestAsset",
+    "out_data_dir": "C:/code/python/PDX/experiments/data_collector/data_out",
+    "duration": 10,
+    "opcua": {
+        "endpoint": "opc.tcp://DESKTOP-IVS9C61:53530/OPCUA/SimulationServer",
+        "interval": 0.1,
+        "node_info": {
+            "ns=5;s=DoubleDataItem": "DoubleDataItem",
+            "ns=5;s=DateTimeDataItem": "DateTimeDataItem",
+            "ns=3;i=1006": "Triangle",
+            "ns=3;i=1005": "Square",
+            "ns=3;i=1002": "Random",
+            "ns=3;i=1003": "Sawtooth",
+            "ns=5;s=Float": "Float"
+        },
+        "anon_login": true
+    },
+    "nidaq": {
+        "chassis": "cDAQ2",
+        "modules": {
+            "NI 9234": {
+                "name": "NI 9234",
+                "device": "cDAQ2Mod1",
+                "channels": {
+                    "ai0": {
+                        "name": "9234_ai0",
+                        "coupling": "AC",
+                        "iepe": true
+                    }
+                },
+                "sample_rate": 25600
+            }
+        }
+    },
+    "trigger": {
+        "start": {
+            "type": "opcua",
+            "conditions": [
+                {
+                    "node": "Square",
+                    "operator": "==",
+                    "value": 2.0
+                },
+                {
+                    "node": "Triangle",
+                    "operator": ">=",
+                    "value": 0.4
+                }
+            ],
+            "logic": "and"
+        }
+    }
+}
