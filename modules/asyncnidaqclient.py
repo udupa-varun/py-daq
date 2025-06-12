@@ -74,8 +74,9 @@ class NIDAQModule:
                 samps_per_chan=self.buffer_size,
             )
 
-            for i, (channel_id, config) in enumerate(self.channels.items()):
-                channel = self.task.ai_channels[i]
+            for channel, (channel_id, config) in zip(
+                self.task.ai_channels, self.channels.items()
+            ):
                 coupling_type = Coupling.DC
 
                 if hasattr(channel, "ai_coupling"):
@@ -99,12 +100,10 @@ class NIDAQModule:
             # Configure larger input buffer
             self.logger.debug("Configuring input buffer")
             self.task.in_stream.input_buf_size = (
-                self.buffer_size * 8
+                self.buffer_size * 1  # 8
             )  # Increased multiplier
             self.task.in_stream.auto_start = True  # Changed to True
-            self.task.in_stream.relative_to = (
-                ReadRelativeTo.FIRST_SAMPLE
-            )  # Changed from CURRENT_READ_POSITION
+            self.task.in_stream.relative_to = ReadRelativeTo.CURRENT_READ_POSITION
             self.task.in_stream.offset = 0
 
             # Initialize the data buffer and reader
