@@ -252,7 +252,7 @@ class AsyncNIDAQClient:
                     self.logger.error(f"Error stopping module {slot_id}: {e}")
         self.modules.clear()
 
-    async def read_chunk(self) -> Dict[str, np.ndarray]:
+    async def read_chunk_from_all_modules(self) -> Dict[str, np.ndarray]:
         """Read a chunk of data from all modules"""
         data = {}
         try:

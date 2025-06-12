@@ -217,7 +217,7 @@ class DataCollector:
                 opcua_group.create_dataset(
                     "timestamp", shape=(0,), maxshape=(None,), dtype="float64"
                 )
-
+                # TODO: accomodate for nodes of type string
                 for node_id, node_label in self.config["opcua"]["node_info"].items():
                     opcua_group.create_dataset(
                         node_label, shape=(0,), maxshape=(None,), dtype="float64"
@@ -264,7 +264,9 @@ class DataCollector:
                     while (
                         get_utcnow() - collection_start_time
                     ).total_seconds() < self.config["duration"]:
-                        nidaq_data = await self.nidaq_client.read_chunk()
+                        nidaq_data = (
+                            await self.nidaq_client.read_chunk_from_all_modules()
+                        )
                         for slot_id, module_data in nidaq_data.items():
                             module_group = cast(Group, nidaq_group[slot_id])
                             chunk_size = module_data.shape[1]
