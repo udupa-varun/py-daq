@@ -1,3 +1,4 @@
+from alive_progress import alive_bar
 import asyncio
 import logging
 from datetime import datetime, timezone
@@ -262,37 +263,44 @@ class DataCollector:
                 async def collect_opcua():
                     """Separate task for OPC UA data collection"""
                     opcua_index = 0
-                    while (
-                        get_utcnow() - collection_start_time
-                    ).total_seconds() < self.config["duration"]:
-                        opcua_data = await self.opcua_client.collect_data(
-                            self.config["opcua"]["node_info"]
-                        )
+                    # Display (approx) progress bar using OPCUA data collection
+                    with alive_bar(
+                        int(self.config["duration"] / self.config["opcua"]["interval"])
+                    ) as bar:
+                        while (
+                            get_utcnow() - collection_start_time
+                        ).total_seconds() < self.config["duration"]:
+                            opcua_data = await self.opcua_client.collect_data(
+                                self.config["opcua"]["node_info"]
+                            )
 
-                        # Store OPCUA data
-                        new_size = opcua_index + 1
-                        opcua_group["timestamp"].resize((new_size,))
-                        relative_time = (
-                            datetime.fromisoformat(opcua_data["AbsTimestamp"])
-                            - collection_start_time
-                        ).total_seconds()
-                        opcua_group["timestamp"][opcua_index] = relative_time
+                            # Store OPCUA data
+                            new_size = opcua_index + 1
+                            opcua_group["timestamp"].resize((new_size,))
+                            relative_time = (
+                                datetime.fromisoformat(opcua_data["AbsTimestamp"])
+                                - collection_start_time
+                            ).total_seconds()
+                            opcua_group["timestamp"][opcua_index] = relative_time
 
-                        for node_id, node_label in self.config["opcua"][
-                            "node_info"
-                        ].items():
-                            dataset = opcua_group[node_label]
-                            dataset.resize((new_size,))
-                            value = opcua_data.get(node_label)
-                            if isinstance(value, datetime):
-                                dataset[opcua_index] = value.timestamp()
-                            else:
-                                dataset[opcua_index] = value
+                            for node_id, node_label in self.config["opcua"][
+                                "node_info"
+                            ].items():
+                                dataset = opcua_group[node_label]
+                                dataset.resize((new_size,))
+                                value = opcua_data.get(node_label)
+                                if isinstance(value, datetime):
+                                    dataset[opcua_index] = value.timestamp()
+                                else:
+                                    dataset[opcua_index] = value
 
-                        opcua_index += 1
+                            opcua_index += 1
 
-                        # Sleep only affects OPCUA collection
-                        await asyncio.sleep(self.config["opcua"]["interval"])
+                            # Sleep only affects OPCUA collection
+                            await asyncio.sleep(self.config["opcua"]["interval"])
+
+                            # Update progress bar
+                            bar()
 
                 # Run both collection tasks concurrently
                 await asyncio.gather(collect_nidaq(), collect_opcua())
