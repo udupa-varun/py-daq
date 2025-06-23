@@ -1,0 +1,88 @@
+{
+    "asset": "TestAsset",
+    "out_data_dir": "C:/code/python/PDX/experiments/data_collector/data_out",
+    "duration": 10,
+    "opcua": {
+        "endpoint": "opc.tcp://DESKTOP-IVS9C61:53530/OPCUA/SimulationServer",
+        "interval": 0.1,
+        "node_info": {
+            "ns=5;s=DoubleDataItem": {"label": "DoubleDataItem", "dtype": "float64"},
+            "ns=5;s=DateTimeDataItem": {"label": "DateTimeDataItem"},
+            "ns=3;i=1006": {"label": "Triangle"},
+            "ns=3;i=1005": {"label": "Square"},
+            "ns=3;i=1002": {"label": "Random"},
+            "ns=3;i=1003": {"label": "Sawtooth"},
+            "ns=3;i=1001": {"label": "Counter"},
+            "ns=5;s=Float": {"label": "Float"},
+            "ns=5;s=String": {"label": "String", "dtype": "string"}
+        },
+        "anon_login": true
+    },
+    "nidaq": {
+        "chassis": "cDAQ1",
+        "modules": {
+            "NI 9234": {
+                "name": "NI 9234",
+                "device": "cDAQ1Mod1",
+                "channels": {
+                    "ai0": {
+                        "name": "9234_ai0",
+                        "coupling": "AC",
+                        "iepe": true
+                    },
+                    "ai1": {
+                        "name": "9234_ai1",
+                        "coupling": "AC",
+                        "iepe": true
+                    }
+                },
+                "sample_rate": 12800
+            },
+            "NI 9252": {
+                "name": "NI 9252",
+                "device": "cDAQ1Mod2",
+                "channels": {
+                    "ai0": {
+                        "name": "9252_ai0",
+                        "coupling": "DC",
+                        "iepe": false
+                    },
+                    "ai1": {
+                        "name": "9252_ai1",
+                        "coupling": "DC",
+                        "iepe": false
+                    },
+                    "ai2": {
+                        "name": "9252_ai2",
+                        "coupling": "DC",
+                        "iepe": false
+                    }
+                },
+                "sample_rate": 12800
+            }
+        }
+    },
+    "trigger": {
+        "start": {
+            "type": "opcua",
+            "conditions": [
+                {
+                    "node": "Square",
+                    "operator": "==",
+                    "value": 2.0
+                },
+                {
+                    "node": "Triangle",
+                    "operator": ">=",
+                    "value": 0.4
+                }
+            ],
+            "logic": "or"
+        },
+        "stop": {
+            "type": "opcua",
+            "conditions":[],
+            "logic": "or"
+        }
+    }
+}
