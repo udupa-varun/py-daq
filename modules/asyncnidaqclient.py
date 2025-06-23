@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import time
-from enum import Enum
 from typing import Dict, Optional, Any, NamedTuple
 import numpy as np
 import nidaqmx
@@ -9,10 +8,7 @@ from nidaqmx import errors
 from nidaqmx.constants import (
     Edge,
     AcquisitionType,
-    TerminalConfiguration,
     Coupling,
-    AccelUnits,
-    CurrentShuntResistorLocation,
     ExcitationSource,
     ReadRelativeTo,
 )
@@ -156,19 +152,7 @@ class NIDAQModule:
                 self.start_time = time.time()
 
             await asyncio.to_thread(self._read_chunk_blocking)
-
             self.total_samples += self.samples_per_chunk
-            # current_time = time.time()
-            # actual_rate = self.samples_per_chunk / (current_time - self.start_time)
-
-            # if (
-            #     abs(actual_rate - self.sample_rate) > self.sample_rate * 0.1
-            # ):  # 10% tolerance
-            #     self.logger.warning(
-            #         f"Module {self.device} actual rate ({actual_rate:.1f} Hz) "
-            #         f"differs from configured rate ({self.sample_rate} Hz)"
-            #     )
-
             return self.buffer.copy()
         except Exception as e:
             self.logger.error(f"Error reading from module {self.module_type}: {str(e)}")

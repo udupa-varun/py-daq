@@ -80,7 +80,7 @@ class AsyncOPCUAClient:
                 self.logger.error(f"Error during disconnect: {e}")
 
     async def collect_data(
-        self, nodes: Optional[Dict[str, str]] = None
+        self, nodes: Optional[Dict[str, Dict[str, str]]] = None
     ) -> Dict[str, Any]:
         """
         Collect data from specified nodes
@@ -89,15 +89,24 @@ class AsyncOPCUAClient:
             if not await self.connect():
                 return {}
 
-        data = {"AbsTimestamp": datetime.now(timezone.utc).isoformat()}
+        data: Dict[str, Any] = {"AbsTimestamp": datetime.now(timezone.utc).isoformat()}
 
-        nodes_to_read = nodes or self._nodes
+        if nodes:
+            nodes_to_read = nodes
+        else:
+            # Fallback to all cached nodes, using node_id as label
+            nodes_to_read = {node_id: {"label": node_id} for node_id in self._nodes}
+
+        if not nodes_to_read:
+            return data
+
         read_tasks = [self.read_node_value(node_id) for node_id in nodes_to_read.keys()]
 
         try:
             values = await asyncio.gather(*read_tasks, return_exceptions=True)
 
-            for (node_id, node_label), value in zip(nodes_to_read.items(), values):
+            for (node_id, node_info), value in zip(nodes_to_read.items(), values):
+                node_label = node_info["label"]
                 if isinstance(value, Exception):
                     self.logger.error(f"Error reading {node_label}: {value}")
                     data[node_label] = self._last_values.get(node_id)
@@ -107,7 +116,8 @@ class AsyncOPCUAClient:
 
         except Exception as e:
             self.logger.error(f"Error collecting data: {e}")
-            for node_id, node_label in nodes_to_read.items():
+            for node_id, node_info in nodes_to_read.items():
+                node_label = node_info["label"]
                 data[node_label] = self._last_values.get(node_id)
 
         return data

@@ -3,7 +3,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Dict, Any, cast
+from typing import Optional, cast
 import h5py
 from h5py import Group, Dataset
 import numpy as np
@@ -57,83 +57,62 @@ class DataCollector:
             self.logger.error(f"Error verifying connections: {e}")
             return False
 
-    async def monitor_triggers(self):
-        """Monitor start and stop trigger conditions"""
-        # TODO: String triggers do not work
-        # TODO: Stop triggers are not being checked for
-        # TODO: Add nested logic?
-        # TODO: Add xor?
-        # try:
-        while not self.start_trigger.is_set() or not self.stop_trigger.is_set():
-            try:
-                if not self.start_trigger.is_set():
-                    # Check start trigger conditions
-                    start_conditions = self.config["trigger"]["start"]["conditions"]
-                    start_logic = self.config["trigger"]["start"]["logic"]
+    async def monitor_start_trigger(self):
+        """Monitor start trigger conditions"""
+        try:
+            while not self.start_trigger.is_set():
+                # Check start trigger conditions
+                start_conditions = self.config["trigger"]["start"]["conditions"]
+                start_logic = self.config["trigger"]["start"]["logic"]
 
-                    if start_logic == "and":
+                if start_logic == "and":
+                    if all(
+                        [await self._check_condition(cond) for cond in start_conditions]
+                    ):
+                        self.start_trigger.set()
+                elif start_logic == "or":
+                    if any(
+                        [await self._check_condition(cond) for cond in start_conditions]
+                    ):
+                        self.start_trigger.set()
+                else:
+                    raise Exception(f"Unsupported logic condition {start_logic}!")
+                await asyncio.sleep(0.1)
+        except Exception as e:
+            self.logger.error(f"Error in start trigger monitoring: {e}")
+            self.logger.error("Beginning data collection immediately.")
+            self.start_trigger.set()
+
+    async def monitor_stop_trigger(self):
+        """Monitor stop trigger conditions"""
+        try:
+            if "stop" in self.config.get("trigger", {}):
+                while not self.stop_trigger.is_set():
+                    # Check stop trigger conditions
+                    stop_conditions = self.config["trigger"]["stop"]["conditions"]
+                    stop_logic = self.config["trigger"]["stop"]["logic"]
+
+                    if stop_logic == "and":
                         if all(
                             [
                                 await self._check_condition(cond)
-                                for cond in start_conditions
+                                for cond in stop_conditions
                             ]
                         ):
-                            self.start_trigger.set()
-                    elif start_logic == "or":
+                            self.stop_trigger.set()
+                    elif stop_logic == "or":
                         if any(
                             [
                                 await self._check_condition(cond)
-                                for cond in start_conditions
+                                for cond in stop_conditions
                             ]
                         ):
-                            self.start_trigger.set()
-                    else:
-                        raise Exception(f"Unsupported logic condition {start_logic}!")
-
-            except Exception as e:
-                self.logger.error(f"Error in start trigger monitoring: {e}")
-                self.logger.error("Beginning data collection immediately.")
-                self.start_trigger.set()
-
-            try:
-                if not self.stop_trigger.is_set():
-                    # Check stop trigger conditions if configured
-                    if "stop" in self.config.get("trigger", {}):
-                        stop_conditions = self.config["trigger"]["stop"]["conditions"]
-                        stop_logic = self.config["trigger"]["stop"]["logic"]
-
-                        self.logger.debug(f"STOP: {stop_conditions}")
-                        self.logger.debug(stop_logic)
-
-                        if stop_logic == "and":
-                            if all(
-                                [
-                                    await self._check_condition(cond)
-                                    for cond in stop_conditions
-                                ]
-                            ):
-                                self.stop_trigger.set()
-                        else:  # "or"
-                            if any(
-                                [
-                                    await self._check_condition(cond)
-                                    for cond in stop_conditions
-                                ]
-                            ):
-                                self.stop_trigger.set()
-
-            except Exception as e:
-                self.logger.error(f"Error in stop trigger monitoring: {e}")
-                self.logger.error("Ending data collection immediately.")
-                self.stop_trigger.set()
-
-            await asyncio.sleep(0.1)
-
-        # except Exception as e:
-        #     self.logger.error(f"Error in start trigger monitoring: {e}")
-        #     self.logger.error("Beginning data collection immediately.")
-        #     self.start_trigger.set()
-        #     # self.stop_trigger.set()
+                            self.stop_trigger.set()
+                    await asyncio.sleep(0.1)
+        except Exception as e:
+            self.logger.error(f"Error in stop trigger monitoring: {e}")
+            self.logger.error("Ending data collection immediately.")
+            self.stop_trigger.set()
 
     async def _check_condition(self, condition: dict) -> bool:
         """Check a single trigger condition"""
@@ -142,7 +121,7 @@ class DataCollector:
             node_id = [
                 k
                 for k, v in self.config["opcua"]["node_info"].items()
-                if v == condition["node"]
+                if v["label"] == condition["node"]
             ]
             if node_id:
                 value = await self.opcua_client.read_node_value(node_id[0])
@@ -184,7 +163,7 @@ class DataCollector:
             if not self.start_trigger.is_set():
                 self.logger.info("Waiting for start trigger conditions...")
                 # self.logger.info(f"{self.config['trigger']['start']}")
-                self._monitor_task = asyncio.create_task(self.monitor_triggers())
+                self._monitor_task = asyncio.create_task(self.monitor_start_trigger())
 
                 try:
                     await asyncio.wait_for(self.start_trigger.wait(), timeout=None)
@@ -217,10 +196,12 @@ class DataCollector:
                 opcua_group.create_dataset(
                     "timestamp", shape=(0,), maxshape=(None,), dtype="float64"
                 )
-                # TODO: accomodate for nodes of type string
-                for node_id, node_label in self.config["opcua"]["node_info"].items():
+                for node_id, node_info in self.config["opcua"]["node_info"].items():
+                    dtype = node_info.get("dtype", "float64")
+                    if dtype == "string":
+                        dtype = h5py.string_dtype(encoding="utf-8")
                     opcua_group.create_dataset(
-                        node_label, shape=(0,), maxshape=(None,), dtype="float64"
+                        node_info["label"], shape=(0,), maxshape=(None,), dtype=dtype
                     )
 
                 # Setup NI-DAQ datasets for each module
@@ -262,8 +243,10 @@ class DataCollector:
                 async def collect_nidaq():
                     """Separate task for NI-DAQ data collection"""
                     while (
-                        get_utcnow() - collection_start_time
-                    ).total_seconds() < self.config["duration"]:
+                        not self.stop_trigger.is_set()
+                        and (get_utcnow() - collection_start_time).total_seconds()
+                        < self.config["duration"]
+                    ):
                         nidaq_data = (
                             await self.nidaq_client.read_chunk_from_all_modules()
                         )
@@ -303,8 +286,10 @@ class DataCollector:
                     # Display (approx) progress bar using OPCUA data collection
                     with alive_bar() as bar:
                         while (
-                            get_utcnow() - collection_start_time
-                        ).total_seconds() < self.config["duration"]:
+                            not self.stop_trigger.is_set()
+                            and (get_utcnow() - collection_start_time).total_seconds()
+                            < self.config["duration"]
+                        ):
                             opcua_data = await self.opcua_client.collect_data(
                                 self.config["opcua"]["node_info"]
                             )
@@ -320,9 +305,10 @@ class DataCollector:
                                 relative_time
                             )
 
-                            for node_id, node_label in self.config["opcua"][
+                            for node_id, node_info in self.config["opcua"][
                                 "node_info"
                             ].items():
+                                node_label = node_info["label"]
                                 dataset = cast(Dataset, opcua_group[node_label])
                                 dataset.resize((new_size,))
                                 value = opcua_data.get(node_label)
@@ -340,7 +326,30 @@ class DataCollector:
                             bar()
 
                 # Run both collection tasks concurrently
-                await asyncio.gather(collect_nidaq(), collect_opcua())
+                self.logger.info(
+                    f"Collecting data for up to {self.config['duration']} seconds or until stop trigger..."
+                )
+
+                stop_monitor_task = asyncio.create_task(self.monitor_stop_trigger())
+                collection_tasks = [
+                    asyncio.create_task(collect_nidaq()),
+                    asyncio.create_task(collect_opcua()),
+                ]
+
+                # Wait for either collection to finish (duration) or stop trigger
+                done, pending = await asyncio.wait(
+                    collection_tasks + [stop_monitor_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                # If stop trigger fired, log it
+                if stop_monitor_task in done:
+                    self.logger.info("Stop trigger condition met. Stopping collection.")
+
+                # Cancel pending tasks
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
 
                 # Store end time in metadata
                 meta_group.attrs["end_time"] = datetime.now(timezone.utc).isoformat()
