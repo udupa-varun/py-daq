@@ -324,7 +324,9 @@ class DataCollector:
                 stop_monitor_task = asyncio.create_task(self.monitor_stop_trigger())
                 opcua_task = asyncio.create_task(collect_opcua())
                 nidaq_task = asyncio.create_task(
-                    self.nidaq_client.run_acquisition(self.nidaq_data_callback)
+                    self.nidaq_client.run_acquisition(
+                        self.nidaq_data_callback, self.config["duration"]
+                    )
                 )
 
                 collection_tasks = [opcua_task, nidaq_task]

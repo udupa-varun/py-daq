@@ -145,23 +145,37 @@ class NIDAQTaskGroup:
                 self.task.close()
             return False
 
-    def _read_chunk_blocking(self):
+    def _read_chunk_blocking(self, num_samples: int):
         if not self.task or not self.reader or self.buffer is None:
             return
+
+        # Create a buffer of the correct size for the read
+        read_buffer = np.zeros((self.total_channels, num_samples), dtype=np.float64)
+
         self.reader.read_many_sample(
-            self.buffer,
-            number_of_samples_per_channel=self.samples_per_chunk,
+            read_buffer,
+            number_of_samples_per_channel=num_samples,
             timeout=self.chunk_duration * 5,
         )
+        return read_buffer
 
-    async def read_chunk(self) -> Optional[Dict[str, np.ndarray]]:
+    async def read_chunk(
+        self, num_samples: Optional[int] = None
+    ) -> Optional[Dict[str, np.ndarray]]:
         if not self.task or not self.reader or self.buffer is None:
             return None
+
+        read_samples = (
+            num_samples if num_samples is not None else self.samples_per_chunk
+        )
+
         try:
-            await asyncio.to_thread(self._read_chunk_blocking)
+            data = await asyncio.to_thread(self._read_chunk_blocking, read_samples)
+            if data is None:
+                return None
             demultiplexed_data = {}
             for slot_id, channel_slice in self.module_channel_indices.items():
-                demultiplexed_data[slot_id] = self.buffer[channel_slice, :].copy()
+                demultiplexed_data[slot_id] = data[channel_slice, :].copy()
             return demultiplexed_data
         except Exception as e:
             self.logger.error(
@@ -256,36 +270,50 @@ class AsyncNIDAQClient:
         self,
         task_group: NIDAQTaskGroup,
         data_callback: Callable[[Dict[str, np.ndarray]], Awaitable[None]],
+        duration: float,
     ):
         """Acquisition loop for a single task group."""
         self.logger.info(
             f"Starting acquisition loop for sample rate {task_group.sample_rate} Hz"
         )
-        while self._running:
-            try:
+
+        total_samples = int(duration * task_group.sample_rate)
+        samples_per_chunk = task_group.samples_per_chunk
+        num_full_chunks = total_samples // samples_per_chunk
+        remainder_samples = total_samples % samples_per_chunk
+
+        try:
+            # Read full chunks
+            for _ in range(num_full_chunks):
                 data = await task_group.read_chunk()
                 if data:
                     await data_callback(data)
-            except asyncio.CancelledError:
-                self.logger.info(
-                    f"Acquisition loop for {task_group.sample_rate} Hz cancelled."
-                )
-                break
-            except Exception as e:
-                self.logger.error(
-                    f"Error in acquisition loop for {task_group.sample_rate} Hz: {e}"
-                )
-                await asyncio.sleep(0.1)
+
+            # Read remainder
+            if remainder_samples > 0:
+                data = await task_group.read_chunk(num_samples=remainder_samples)
+                if data:
+                    await data_callback(data)
+
+        except asyncio.CancelledError:
+            self.logger.info(
+                f"Acquisition loop for {task_group.sample_rate} Hz cancelled."
+            )
+        except Exception as e:
+            self.logger.error(
+                f"Error in acquisition loop for {task_group.sample_rate} Hz: {e}"
+            )
 
     async def run_acquisition(
-        self, data_callback: Callable[[Dict[str, np.ndarray]], Awaitable[None]]
+        self,
+        data_callback: Callable[[Dict[str, np.ndarray]], Awaitable[None]],
+        duration: float,
     ):
         """Run acquisition loops for all task groups."""
-        self._running = True
         self.acquisition_tasks = []
         for task_group in self.task_groups.values():
             loop_task = asyncio.create_task(
-                self._acquisition_loop(task_group, data_callback)
+                self._acquisition_loop(task_group, data_callback, duration)
             )
             self.acquisition_tasks.append(loop_task)
         if self.acquisition_tasks:
