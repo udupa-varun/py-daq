@@ -40,123 +40,133 @@ class NIDAQModule:
         self.sample_rate = sample_rate
         self.chunk_duration = chunk_duration
         self.module_type = module_type
+        self.samples_per_chunk = int(self.sample_rate * self.chunk_duration)
+
+
+class NIDAQTaskGroup:
+    def __init__(self, sample_rate: int, modules: Dict[str, NIDAQModule]):
+        self.logger = logging.getLogger(f"pdx.nidaqgroup.{sample_rate}")
+        self.sample_rate = sample_rate
+        self.modules = modules
         self.task: Optional[nidaqmx.Task] = None
         self.reader: Optional[AnalogMultiChannelReader] = None
-
-        # Increase buffer sizes
-        self.samples_per_chunk = int(self.sample_rate * self.chunk_duration)
-        self.buffer_size = self.samples_per_chunk * 20
         self.buffer: Optional[np.ndarray] = None
-        self.start_time: Optional[float] = None
-        self.total_samples = 0
+        self.total_channels = sum(len(m.channels) for m in modules.values())
+        self.samples_per_chunk = list(modules.values())[0].samples_per_chunk
+        self.chunk_duration = list(modules.values())[0].chunk_duration
+        self.module_channel_indices: Dict[str, slice] = {}
 
     async def setup_task(self) -> bool:
-        """Setup the DAQ task with proper channel configuration"""
         try:
-            task_name = f"{self.device}_AI_Task"
+            task_name = f"TaskGroup_{self.sample_rate}Hz"
             self.logger.debug(f"Creating task: {task_name}")
             self.task = nidaqmx.Task(task_name)
 
-            for channel_id in self.channels:
-                physical_channel = f"{self.device}/{channel_id}"
-                self.logger.debug(f"Adding channel: {physical_channel}")
-                self.task.ai_channels.add_ai_voltage_chan(physical_channel)
+            # Step 1: Add all channels to the task first
+            all_channels_config = []
+            current_channel_index = 0
+            for slot_id, module in self.modules.items():
+                num_module_channels = len(module.channels)
+                self.module_channel_indices[slot_id] = slice(
+                    current_channel_index, current_channel_index + num_module_channels
+                )
+                current_channel_index += num_module_channels
 
+                for channel_id, config in module.channels.items():
+                    physical_channel = f"{module.device}/{channel_id}"
+                    self.logger.debug(f"Adding channel: {physical_channel}")
+                    self.task.ai_channels.add_ai_voltage_chan(physical_channel)
+                    all_channels_config.append(config)
+
+            # Step 2: Configure timing for the entire task
+            buffer_size = self.samples_per_chunk * 20
             self.logger.debug(f"Configuring timing: {self.sample_rate} Hz")
+            master_clock_source = (
+                f"/{list(self.modules.values())[0].device}/ai/SampleClock"
+            )
+            self.logger.info(f"Using {master_clock_source} as the master sample clock.")
             self.task.timing.cfg_samp_clk_timing(
                 rate=self.sample_rate,
-                source="",
+                source=master_clock_source,
                 active_edge=Edge.RISING,
                 sample_mode=AcquisitionType.CONTINUOUS,
-                samps_per_chan=self.buffer_size,
+                samps_per_chan=buffer_size,
             )
 
-            for channel, (channel_id, config) in zip(
-                self.task.ai_channels, self.channels.items()
-            ):
-                coupling_type = Coupling.DC
-
-                if hasattr(channel, "ai_coupling"):
-                    coupling_type = (
-                        Coupling.AC if config.coupling.upper() == "AC" else Coupling.DC
+            # Step 3: Configure individual channel properties
+            for ai_channel, config in zip(self.task.ai_channels, all_channels_config):
+                coupling_type = (
+                    Coupling.AC if config.coupling.upper() == "AC" else Coupling.DC
+                )
+                if hasattr(ai_channel, "ai_coupling"):
+                    ai_channel.ai_coupling = coupling_type
+                    self.logger.debug(
+                        f"Set coupling for {ai_channel.name}: {coupling_type}"
                     )
-                    channel.ai_coupling = coupling_type
-                    self.logger.debug(f"Set coupling for {channel_id}: {coupling_type}")
 
-                if coupling_type == Coupling.AC:
-                    if hasattr(channel, "ai_excit_src"):
-                        if config.iepe:
-                            channel.ai_excit_src = ExcitationSource.INTERNAL
-                            if hasattr(channel, "ai_excit_val"):
-                                channel.ai_excit_val = config.iepe_current
-                            self.logger.debug(f"Enabled IEPE for {channel_id}")
-                        else:
-                            channel.ai_excit_src = ExcitationSource.NONE
-                            self.logger.debug(f"Disabled IEPE for {channel_id}")
+                if coupling_type == Coupling.AC and hasattr(ai_channel, "ai_excit_src"):
+                    if config.iepe:
+                        ai_channel.ai_excit_src = ExcitationSource.INTERNAL
+                        if hasattr(ai_channel, "ai_excit_val"):
+                            ai_channel.ai_excit_val = config.iepe_current
+                        self.logger.debug(f"Enabled IEPE for {ai_channel.name}")
+                    else:
+                        ai_channel.ai_excit_src = ExcitationSource.NONE
+                        self.logger.debug(f"Disabled IEPE for {ai_channel.name}")
 
-            # Configure larger input buffer
             self.logger.debug("Configuring input buffer")
-            self.task.in_stream.input_buf_size = (
-                self.buffer_size * 1  # 8
-            )  # Increased multiplier
-            self.task.in_stream.auto_start = True  # Changed to True
+            self.task.in_stream.input_buf_size = buffer_size * 2
+            self.task.in_stream.auto_start = True
             self.task.in_stream.relative_to = ReadRelativeTo.CURRENT_READ_POSITION
             self.task.in_stream.offset = 0
 
-            # Initialize the data buffer and reader
             self.buffer = np.zeros(
-                (len(self.channels), self.samples_per_chunk), dtype=np.float64
+                (self.total_channels, self.samples_per_chunk), dtype=np.float64
             )
             self.reader = AnalogMultiChannelReader(self.task.in_stream)
 
             self.logger.info(
-                f"Successfully configured task for {self.device} with "
-                f"{len(self.channels)} channels at {self.sample_rate} Hz"
+                f"Successfully configured task group for {self.sample_rate} Hz with {self.total_channels} channels"
             )
             return True
 
         except errors.DaqError as e:
             self.logger.error(
-                f"DAQmx Error setting up task for {self.device}: {str(e)}"
+                f"DAQmx Error setting up task group for {self.sample_rate} Hz: {e}"
             )
             if self.task:
                 self.task.close()
-                self.task = None
             return False
         except Exception as e:
             self.logger.error(
-                f"Unexpected error setting up task for {self.device}: {str(e)}"
+                f"Unexpected error setting up task group for {self.sample_rate} Hz: {e}"
             )
             if self.task:
                 self.task.close()
-                self.task = None
             return False
 
-    def _read_chunk_blocking(self) -> None:
-        """Blocking call to read data from the DAQ"""
+    def _read_chunk_blocking(self):
         if not self.task or not self.reader or self.buffer is None:
             return
-
         self.reader.read_many_sample(
             self.buffer,
             number_of_samples_per_channel=self.samples_per_chunk,
-            timeout=self.chunk_duration * 2,
+            timeout=self.chunk_duration * 5,
         )
 
-    async def read_chunk(self) -> Optional[np.ndarray]:
-        """Read a chunk of data from the DAQ"""
+    async def read_chunk(self) -> Optional[Dict[str, np.ndarray]]:
         if not self.task or not self.reader or self.buffer is None:
             return None
-
         try:
-            if self.start_time is None:
-                self.start_time = time.time()
-
             await asyncio.to_thread(self._read_chunk_blocking)
-            self.total_samples += self.samples_per_chunk
-            return self.buffer.copy()
+            demultiplexed_data = {}
+            for slot_id, channel_slice in self.module_channel_indices.items():
+                demultiplexed_data[slot_id] = self.buffer[channel_slice, :].copy()
+            return demultiplexed_data
         except Exception as e:
-            self.logger.error(f"Error reading from module {self.module_type}: {str(e)}")
+            self.logger.error(
+                f"Error reading from task group {self.sample_rate} Hz: {e}"
+            )
             return None
 
 
@@ -165,36 +175,22 @@ class AsyncNIDAQClient:
         self.logger = logging.getLogger("pdx-asyncua.nidaqclient")
         self.chassis = chassis
         self.modules: Dict[str, NIDAQModule] = {}
-        self.grouped_modules: DefaultDict[int, Dict[str, NIDAQModule]] = defaultdict(
-            dict
-        )
+        self.task_groups: Dict[int, NIDAQTaskGroup] = {}
         self._running = False
         self.acquisition_tasks = []
 
         # Create module objects from config
+        grouped_modules: DefaultDict[int, Dict[str, NIDAQModule]] = defaultdict(dict)
         for slot_id, config in modules_config.items():
-            # Convert channel config to ChannelConfig objects
-            channels = {}
-            for channel_id, channel_info in config["channels"].items():
-                if isinstance(channel_info, dict):
-                    channels[channel_id] = ChannelConfig(
-                        name=channel_info["name"],
-                        coupling=channel_info.get("coupling", "DC"),
-                        iepe=channel_info.get("iepe", False),
-                        # iepe_current=channel_info.get("iepe_current", 2.0),
-                    )
-                else:
-                    # Handle legacy format where channel_info is just the name
-                    channels[channel_id] = ChannelConfig(
-                        name=channel_info,
-                        coupling="DC",
-                        iepe=False,
-                        # iepe_current=2.0,
-                    )
-
-            # Adjust chunk duration based on sample rate
+            channels = {
+                channel_id: ChannelConfig(
+                    name=channel_info["name"],
+                    coupling=channel_info.get("coupling", "DC"),
+                    iepe=channel_info.get("iepe", False),
+                )
+                for channel_id, channel_info in config["channels"].items()
+            }
             chunk_duration = 0.1 if config["sample_rate"] > 10000 else 0.5
-
             module = NIDAQModule(
                 device=config["device"],
                 channels=channels,
@@ -203,29 +199,31 @@ class AsyncNIDAQClient:
                 module_type=config["name"],
             )
             self.modules[slot_id] = module
-            self.grouped_modules[module.sample_rate][slot_id] = module
+            grouped_modules[module.sample_rate][slot_id] = module
+
+        for sample_rate, modules in grouped_modules.items():
+            self.task_groups[sample_rate] = NIDAQTaskGroup(sample_rate, modules)
 
     async def setup(self) -> bool:
-        """Setup all NI-DAQ modules"""
-        try:
-            for slot_id, module in self.modules.items():
-                if not await module.setup_task():
-                    self.logger.error(f"Failed to setup module {slot_id}")
-                    return False
-                self.logger.info(f"Successfully configured module {slot_id}")
-            return True
-        except Exception as e:
-            self.logger.error(f"Error setting up NI-DAQ: {e}")
+        """Setup all NI-DAQ task groups"""
+        setup_tasks = [group.setup_task() for group in self.task_groups.values()]
+        results = await asyncio.gather(*setup_tasks)
+        if not all(results):
+            self.logger.error("Failed to setup one or more NI-DAQ task groups.")
             await self.cleanup()
             return False
+        self.logger.info("All NI-DAQ task groups configured successfully.")
+        return True
 
     async def start_acquisition(self) -> bool:
-        """Start acquisition on all modules"""
+        """Start acquisition on all task groups"""
         try:
-            for slot_id, module in self.modules.items():
-                if module.task:
-                    module.task.start()
-                    self.logger.info(f"Started acquisition on module {slot_id}")
+            for group in self.task_groups.values():
+                if group.task:
+                    group.task.start()
+                    self.logger.info(
+                        f"Started acquisition on task group {group.sample_rate} Hz"
+                    )
             return True
         except Exception as e:
             self.logger.error(f"Error starting acquisition: {e}")
@@ -234,66 +232,62 @@ class AsyncNIDAQClient:
     async def stop_acquisition(self):
         """Stop acquisition and cleanup"""
         self._running = False
-        if hasattr(self, "acquisition_tasks"):
-            for task in self.acquisition_tasks:
-                if not task.done():
-                    task.cancel()
+        for task in self.acquisition_tasks:
+            if not task.done():
+                task.cancel()
+        if self.acquisition_tasks:
             await asyncio.gather(*self.acquisition_tasks, return_exceptions=True)
 
-        for slot_id, module in self.modules.items():
-            if module.task:
+        for group in self.task_groups.values():
+            if group.task:
                 try:
-                    module.task.stop()
-                    module.task.close()
-                    self.logger.info(f"Stopped acquisition on module {slot_id}")
+                    group.task.stop()
+                    group.task.close()
+                    self.logger.info(
+                        f"Stopped acquisition on task group {group.sample_rate} Hz"
+                    )
                 except Exception as e:
-                    self.logger.error(f"Error stopping module {slot_id}: {e}")
-        self.modules.clear()
+                    self.logger.error(
+                        f"Error stopping task group {group.sample_rate} Hz: {e}"
+                    )
+        self.task_groups.clear()
 
     async def _acquisition_loop(
         self,
-        sample_rate: int,
-        modules: Dict[str, NIDAQModule],
+        task_group: NIDAQTaskGroup,
         data_callback: Callable[[Dict[str, np.ndarray]], Awaitable[None]],
     ):
-        """Acquisition loop for a group of modules with the same sample rate."""
-        self.logger.info(f"Starting acquisition loop for sample rate {sample_rate} Hz")
-
+        """Acquisition loop for a single task group."""
+        self.logger.info(
+            f"Starting acquisition loop for sample rate {task_group.sample_rate} Hz"
+        )
         while self._running:
             try:
-                read_tasks = [module.read_chunk() for module in modules.values()]
-                results = await asyncio.gather(*read_tasks)
-
-                data = {}
-                for (slot_id, _), result in zip(modules.items(), results):
-                    if result is not None:
-                        data[slot_id] = result
-
+                data = await task_group.read_chunk()
                 if data:
                     await data_callback(data)
-
             except asyncio.CancelledError:
-                self.logger.info(f"Acquisition loop for {sample_rate} Hz cancelled.")
+                self.logger.info(
+                    f"Acquisition loop for {task_group.sample_rate} Hz cancelled."
+                )
                 break
             except Exception as e:
                 self.logger.error(
-                    f"Error in acquisition loop for {sample_rate} Hz: {e}"
+                    f"Error in acquisition loop for {task_group.sample_rate} Hz: {e}"
                 )
                 await asyncio.sleep(0.1)
 
     async def run_acquisition(
         self, data_callback: Callable[[Dict[str, np.ndarray]], Awaitable[None]]
     ):
-        """Run acquisition loops for all sample rate groups."""
+        """Run acquisition loops for all task groups."""
         self._running = True
         self.acquisition_tasks = []
-
-        for sample_rate, modules in self.grouped_modules.items():
+        for task_group in self.task_groups.values():
             loop_task = asyncio.create_task(
-                self._acquisition_loop(sample_rate, modules, data_callback)
+                self._acquisition_loop(task_group, data_callback)
             )
             self.acquisition_tasks.append(loop_task)
-
         if self.acquisition_tasks:
             await asyncio.gather(*self.acquisition_tasks)
 
