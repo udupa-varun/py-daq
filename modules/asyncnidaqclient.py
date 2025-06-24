@@ -1,7 +1,8 @@
 import asyncio
 import logging
 import time
-from typing import Dict, Optional, Any, NamedTuple
+from typing import Dict, Optional, Any, NamedTuple, DefaultDict, Callable, Awaitable
+from collections import defaultdict
 import numpy as np
 import nidaqmx
 from nidaqmx import errors
@@ -163,7 +164,12 @@ class AsyncNIDAQClient:
     def __init__(self, chassis: str, modules_config: Dict[str, Any]):
         self.logger = logging.getLogger("pdx-asyncua.nidaqclient")
         self.chassis = chassis
-        self.modules = {}
+        self.modules: Dict[str, NIDAQModule] = {}
+        self.grouped_modules: DefaultDict[int, Dict[str, NIDAQModule]] = defaultdict(
+            dict
+        )
+        self._running = False
+        self.acquisition_tasks = []
 
         # Create module objects from config
         for slot_id, config in modules_config.items():
@@ -197,6 +203,7 @@ class AsyncNIDAQClient:
                 module_type=config["name"],
             )
             self.modules[slot_id] = module
+            self.grouped_modules[module.sample_rate][slot_id] = module
 
     async def setup(self) -> bool:
         """Setup all NI-DAQ modules"""
@@ -226,6 +233,13 @@ class AsyncNIDAQClient:
 
     async def stop_acquisition(self):
         """Stop acquisition and cleanup"""
+        self._running = False
+        if hasattr(self, "acquisition_tasks"):
+            for task in self.acquisition_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*self.acquisition_tasks, return_exceptions=True)
+
         for slot_id, module in self.modules.items():
             if module.task:
                 try:
@@ -236,19 +250,52 @@ class AsyncNIDAQClient:
                     self.logger.error(f"Error stopping module {slot_id}: {e}")
         self.modules.clear()
 
-    async def read_chunk_from_all_modules(self) -> Dict[str, np.ndarray]:
-        """Read a chunk of data from all modules"""
-        data = {}
-        try:
-            read_tasks = [module.read_chunk() for module in self.modules.values()]
-            results = await asyncio.gather(*read_tasks)
-            for (slot_id, _), result in zip(self.modules.items(), results):
-                if result is not None:
-                    data[slot_id] = result
-            return data
-        except Exception as e:
-            self.logger.error(f"Error reading data: {e}")
-            return {}
+    async def _acquisition_loop(
+        self,
+        sample_rate: int,
+        modules: Dict[str, NIDAQModule],
+        data_callback: Callable[[Dict[str, np.ndarray]], Awaitable[None]],
+    ):
+        """Acquisition loop for a group of modules with the same sample rate."""
+        self.logger.info(f"Starting acquisition loop for sample rate {sample_rate} Hz")
+
+        while self._running:
+            try:
+                read_tasks = [module.read_chunk() for module in modules.values()]
+                results = await asyncio.gather(*read_tasks)
+
+                data = {}
+                for (slot_id, _), result in zip(modules.items(), results):
+                    if result is not None:
+                        data[slot_id] = result
+
+                if data:
+                    await data_callback(data)
+
+            except asyncio.CancelledError:
+                self.logger.info(f"Acquisition loop for {sample_rate} Hz cancelled.")
+                break
+            except Exception as e:
+                self.logger.error(
+                    f"Error in acquisition loop for {sample_rate} Hz: {e}"
+                )
+                await asyncio.sleep(0.1)
+
+    async def run_acquisition(
+        self, data_callback: Callable[[Dict[str, np.ndarray]], Awaitable[None]]
+    ):
+        """Run acquisition loops for all sample rate groups."""
+        self._running = True
+        self.acquisition_tasks = []
+
+        for sample_rate, modules in self.grouped_modules.items():
+            loop_task = asyncio.create_task(
+                self._acquisition_loop(sample_rate, modules, data_callback)
+            )
+            self.acquisition_tasks.append(loop_task)
+
+        if self.acquisition_tasks:
+            await asyncio.gather(*self.acquisition_tasks)
 
     async def cleanup(self):
         """Cleanup resources"""
